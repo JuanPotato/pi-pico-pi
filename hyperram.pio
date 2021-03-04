@@ -1,0 +1,100 @@
+.program hyperram
+.side_set 2
+
+main_start:
+    out pindirs, 8      side 0b0 ; First 8 bits must be 1's
+    out null, 8         side 0b0 ; Discard the next 8 bits to keep it 16-bit aligned
+
+    ; Followed by 48 bits of the CA
+    ; We need to send 3x 16bit words
+    set x, 2    side 0b0
+    com:
+        out pins, 8  side 0b0 [1]
+        nop          side 0b1 [1]
+        out pins, 8  side 0b1 [1]
+        jmp x--, com side 0b0 [1]
+
+    out x, 32   side 0b0 ; used for stalling
+    out y, 32   side 0b0 ; used for main loop, should be length / 2
+
+    ; Now we've consumed four 32-bit
+    ; Consume another 16-bit address and jump to it
+    out pc, 16     side 0b11 [3]
+    ; The address should be either to read or write label
+
+PUBLIC read:
+    out pindirs, 8  side 0b0 [1] ; Set our data pins to input so we can read the response
+    out null, 8     side 0b0 [1] ; flush out 8 more bits
+
+    ; x was set in main_start, just wait for a while
+    read_idle:
+        nop             side 0b1 [3]
+    jmp x--, read_idle  side 0b0 [3]
+
+    ; y was set in main_start
+    read_loop:
+        in pins, 8      side 0b01     ; RWDS , CLK
+        nop             side 0b11 [2] ; RWDS , CLK
+        in pins, 8      side 0b10     ; RWDS , CLK
+    jmp y--, read_loop  side 0b00 [2] ; RWDS , CLK
+
+    jmp main_start  side 0b0
+
+PUBLIC write:
+    out null, 16     side 0b0 [3]; flush out 16 bits
+
+    ; x was set in main_start, just wait for a while
+    write_idle:
+        nop              side 0b1 [3]
+    jmp x--, write_idle  side 0b0 [3]
+
+    ; y was set in main_start
+        nop              side 0b1 [3]
+        nop              side 0b0 [1]
+    write_loop:
+        out pins, 8      side 0b0 [1]
+        nop              side 0b1 [1]
+        out pins, 8      side 0b1 [1]
+    jmp y--, write_loop  side 0b0 [1]
+
+    jmp main_start  side 0b0
+
+
+
+% c-sdk {
+static inline void hyperram_program_init(PIO pio, uint sm, uint offset, uint data_pin, uint clock_rwds_pin, float div) {
+    pio_sm_config c = hyperram_program_get_default_config(offset);
+
+    // Map the state machine's OUT pin group to one pin, namely the `pin`
+    // parameter to this function.
+    sm_config_set_out_pins(&c, data_pin, 8);
+    sm_config_set_in_pins(&c, data_pin);
+    sm_config_set_sideset_pins(&c, clock_rwds_pin);
+
+    // OUT shifts to right, no autopull
+    sm_config_set_out_shift(&c, false, true, 32);
+    // IN shifts to the left, yes autopush
+    sm_config_set_in_shift(&c, false, true, 32);
+
+    sm_config_set_clkdiv(&c, div);
+
+    // Set this pin's GPIO function (connect PIO to the pad)
+    pio_gpio_init(pio, clock_rwds_pin); // Clock pin
+    pio_gpio_init(pio, clock_rwds_pin + 1); // RWDS pin
+    for (int i = 0; i < 8; i++) {
+        pio_gpio_init(pio, data_pin + i);
+    }
+
+    // Set the pin direction to output at the PIO
+    pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 8, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, clock_rwds_pin, 2, true);
+
+    // Load our configuration, and jump to the start of the program
+    pio_sm_init(pio, sm, offset, &c);
+
+    // Set the state machine running
+    //pio_sm_set_enabled(pio, sm, true);
+}
+%}
+
+
